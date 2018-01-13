@@ -1,0 +1,263 @@
+# if redirect to
+<% if fetch(:nginx_redirect) do -%>
+server {
+  <% if fetch(:nginx_redirect_ip) do -%>
+    listen <%= fetch(:nginx_redirect_ip)%>:80;
+  <% else -%>
+    listent 80;
+  <% end -%>
+  server_name <%= fetch(:nginx_redirect_server_name) %>;
+  rewrite ^ http://<%= fetch(:nginx_server_name)%>$request_uri? permanent;
+}
+<% end -%>
+
+server {
+<% if fetch(:nginx_ip) -%>
+  listen <%= fetch(:nginx_ip) %>:80;
+<% else -%>
+  listen 80;
+<% end -%>
+  server_name <%= fetch(:nginx_server_name)%>;
+  server_name_in_redirect off;
+
+  proxy_set_header        X-Real-IP        $remote_addr;
+  proxy_set_header        X-Forwarded-For  $proxy_add_x_forwarded_for;
+  proxy_set_header        Host $host:80;
+
+  set $proxyserver        "http://127.0.0.1:8888";
+  set $docroot            "<%= fetch(:nginx_docroot)%>";
+
+  index index.php;
+  root <%= fetch(:nginx_docroot)%>;
+
+  # Redirect to ssl if need
+  if (-f <%= fetch(:nginx_docroot)%>/.htsecure) { rewrite ^(.*)$ https://$host$1 permanent; }
+
+  # cache condition variable
+  set $usecache "";
+  if ($is_global_cache = 1) { set $usecache "${usecache}A"; }
+
+  ## *** COMMON CONFIGURATION ***
+
+  ## main config without processing cache pages
+  ## general
+
+  ## errors
+  ## Set error handlers
+  error_page 403 /403.html;
+  error_page 404 = @fallback;
+  error_page 500 /500.html;
+  error_page 502 /502.html;
+  error_page 503 /503.html;
+  error_page 504 /504.html;
+
+  ## Custom pages for BitrixEnv errors
+  location ^~ /500.html   { root /var/www/bitrixenv_error; }
+  location ^~ /502.html   { root /var/www/bitrixenv_error; }
+  location ^~ /503.html   { root /var/www/bitrixenv_error; }
+  location ^~ /504.html   { root /var/www/bitrixenv_error; }
+  location ^~ /403.html   { root /var/www/bitrixenv_error; }
+  location ^~ /404.html   { root /var/www/bitrixenv_error; }
+  location @fallback      { proxy_pass $proxyserver; }
+
+  ## subscrider handlers
+  ## Location for long-polling connections
+  #location ^~ /bitrix/sub {
+  #
+  #  # we don't use callback and droppped it (XSS)
+  #  if ( $arg_callback ) {
+  #    return 400;
+  #  }
+  #
+  #        push_stream_subscriber                  long-polling;
+  #        push_stream_allowed_origins             "*";
+  #        push_stream_channels_path               $arg_CHANNEL_ID;
+  #        push_stream_last_received_message_tag   $arg_tag;
+  #        push_stream_longpolling_connection_ttl  40;
+  #        push_stream_authorized_channels_only    on;
+  #        push_stream_message_template '#!NGINXNMS!#{"id":~id~,"channel":"~channel~","tag":"~tag~","time":"~time~","eventid":"~event-id~","text":~text~}#!NGINXNME!#';
+  #}
+
+  # Location for websocet connections
+  #location ^~ /bitrix/subws/ {
+  #        push_stream_subscriber websocket;
+  #        push_stream_channels_path               $arg_CHANNEL_ID;
+  #        push_stream_websocket_allow_publish     off;
+  #        push_stream_ping_message_interval       40s;
+  #        push_stream_authorized_channels_only    on;
+  #        push_stream_last_received_message_tag   "$arg_tag";
+  #        push_stream_last_received_message_time  "$arg_time";
+  #        push_stream_message_template '#!NGINXNMS!#{"id":~id~,"channel":"~channel~","tag":"~tag~","time":"~time~","eventid":"~event-id~","text":~text~}#!NGINXNME!#';
+  #}
+
+  ## blocks
+  ## Deny external access to critical areas
+  ## block this locations for any installation
+
+  # ht(passwd|access)
+  location ~* /\.ht  { deny all; }
+
+  # repositories
+  location ~* /\.(svn|hg|git) { deny all; }
+
+  # bitrix internal locations
+  location ~* ^/bitrix/(modules|local_cache|stack_cache|managed_cache|php_interface) {
+    deny all;
+  }
+
+  # upload files
+  location ~* ^/upload/1c_[^/]+/ { deny all; }
+
+  # use the file system to access files outside the site (cache)
+  location ~* /\.\./ { deny all; }
+  location ~* ^/bitrix/html_pages/\.config\.php { deny all; }
+  location ~* ^/bitrix/html_pages/\.enabled { deny all; }
+
+  # Intenal locations
+  location ^~ /upload/support/not_image   { internal; }
+
+  # Cache location: composite and general site
+  location ~* @.*\.html$ {
+    internal;
+    # disable browser cache, php manage file
+    expires -1y;
+    add_header X-Bitrix-Composite "Nginx (file)";
+  }
+
+  # Player options, disable no-sniff
+  location ~* ^/bitrix/components/bitrix/player/mediaplayer/player$ {
+    add_header Access-Control-Allow-Origin *;
+  }
+
+  # Process dav request on
+  # main company
+  # extranet
+  # additional departments
+  # locations that ends with / directly to apache
+  location ~ ^(/[^/]+)?(/docs|/workgroups|/company/profile|/bitrix/tools|/company/personal/user|/mobile/webdav|/contacts/personal).*/$ {
+    proxy_pass $proxyserver;
+  }
+
+  # Add / to request
+  location ~ ^(/[^/]+)?(/docs|/workgroups|/company/profile|/bitrix/tools|/company/personal/user|/mobile/webdav|/contacts/personal) {
+    set $addslash "";
+    if (-d $request_filename)   { set $addslash "${addslash}Y"; }
+    if ($is_args != '?')    { set $addslash "${addslash}Y"; }
+    if ($addslash = "YY" )    { proxy_pass $proxyserver$request_uri/; }
+
+    proxy_pass $proxyserver;
+  }
+
+  # Accept access for merged css and js
+  location ~* ^/bitrix/cache/(css/.+\.css|js/.+\.js)$ {
+    expires 30d;
+    error_page 404 /404.html;
+  }
+
+  # Disable access for other assets in cache location
+  location ~* ^/bitrix/cache { deny all; }
+
+  # Excange and Outlook
+  location ~ ^/bitrix/tools/ws_.*/_vti_bin/.*\.asmx$ { proxy_pass $proxyserver; }
+
+  # Groupdav
+  location ^~ /bitrix/groupdav.php { proxy_pass $proxyserver; }
+
+  # Add / to request
+  location ~ ^(/[^/]+)?(/docs|/workgroups|/company/profile|/bitrix/tools|/company/personal/user|/mobile/webdav|/contacts/personal) {
+    set $addslash "";
+    if (-d $request_filename)   { set $addslash "${addslash}Y"; }
+    if ($is_args != '?')    { set $addslash "${addslash}Y"; }
+    if ($addslash = "YY" )    { proxy_pass $proxyserver$request_uri/; }
+
+    proxy_pass $proxyserver;
+  }
+
+  # Accept access for merged css and js
+  location ~* ^/bitrix/cache/(css/.+\.css|js/.+\.js)$ {
+    expires 30d;
+    error_page 404 /404.html;
+  }
+
+  # Disable access for other assets in cache location
+  location ~* ^/bitrix/cache { deny all; }
+
+  # Excange and Outlook
+  location ~ ^/bitrix/tools/ws_.*/_vti_bin/.*\.asmx$ { proxy_pass $proxyserver; }
+
+  # Groupdav
+  location ^~ /bitrix/groupdav.php { proxy_pass $proxyserver; }
+
+  # Use nginx to return static content from s3 cloud storage
+  # /upload/bx_cloud_upload/<schema>.<backet_name>.<s3_point>.amazonaws.com/<path/to/file>
+  location ^~ /upload/bx_cloud_upload/ {
+    location ~ ^/upload/bx_cloud_upload/(http[s]?)\.([^/:]+)\.(s3|s3-us-west-1|s3-eu-west-1|s3-ap-southeast-1|s3-ap-northeast-1)\.amazonaws\.com/(.+)$ {
+      internal;
+      resolver 8.8.8.8;
+      proxy_method GET;
+      proxy_set_header    X-Real-IP               $remote_addr;
+      proxy_set_header    X-Forwarded-For         $proxy_add_x_forwarded_for;
+      proxy_set_header    X-Forwarded-Server      $host;
+      #proxy_max_temp_file_size 0;
+      proxy_pass $1://$2.$3.amazonaws.com/$4;
+    }
+
+    location ~* .*$ { deny all; }
+  }
+
+
+  # Static content
+  location ~* ^/(upload|bitrix/images|bitrix/tmp) {
+    expires 30d;
+  }
+
+  location  ~* \.(css|js|gif|png|jpg|jpeg|ico|ogg|ttf|woff|eot|otf)$ {
+    error_page 404 /404.html;
+    expires 30d;
+  }
+
+  # Nginx server status page
+  location ^~ /nginx-status {
+    stub_status on;
+    allow 127.0.0.0/24;
+    deny all;
+  }
+
+  # Bitrix setup script
+  location ^~ ^(/bitrixsetup\.php)$ { proxy_pass $proxyserver; proxy_buffering off; }
+
+  # php file processing
+  location ~ \.php$ {
+
+    set $cache_file "bitrix/html_pages$general_key@$args.html";
+
+    # test file conditions
+    if (-f "$docroot/bitrix/html_pages/.enabled") { set $usecache "${usecache}B"; }
+    if (-f "$docroot/$cache_file")                { set $usecache "${usecache}C"; }
+
+    # create rewrite if cache-file exists
+    if ($usecache = "ABC" ) { rewrite .* /$cache_file last; }
+
+    proxy_pass $proxyserver;
+  }
+
+  # directories page processing
+  location ~ /$ {
+
+    set $cache_file "bitrix/html_pages$general_key/index@$args.html";
+
+    # test file conditions
+    if (-f "$docroot/bitrix/html_pages/.enabled") { set $usecache "${usecache}B"; }
+    if (-f "$docroot/$cache_file")                { set $usecache "${usecache}C"; }
+
+    # create rewrite if cache-file exists
+    if ($usecache = "ABC" ) { rewrite .* /$cache_file last; }
+
+    proxy_pass $proxyserver;
+  }
+
+  # Main location
+  location / {
+    proxy_pass $proxyserver;
+  }
+}
